@@ -7,7 +7,7 @@
     "start": "ts-node src/index.ts"
   },
   "keywords": [],
-  "author": "",
+  "author": "Mahmoud Almountasir",
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^17.0.33",
@@ -21,6 +21,7 @@
     "typescript": "^4.6.4"
   },
   "dependencies": {
-    "dotenv": "^16.0.1"
+    "dotenv": "^16.0.1",
+    "mysql2": "^2.3.3"
   }
 }
