@@ -551,11 +551,6 @@ async function main() {
     database: process.env.DB_NAME,
   });
 
-  db.query("SELECT * FROM `attendance`", function (err, results, fields) {
-    console.log(results); // results contains rows returned by server
-    console.log(fields); // fields contains extra meta data about results, if available
-  });
-
   const z = new ZKTeco();
 
   z.on("info", (info) => {
@@ -570,9 +565,6 @@ async function main() {
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
     console.log("Connected");
-
-    // const serial = await z.getSerialNumber();
-    // console.log({ serial });
 
     await z.disableDevice();
     const users = await z.readAllUserIds();
