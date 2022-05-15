@@ -1,5 +1,6 @@
 import net from "net";
 import { EventEmitter } from "events";
+import "dotenv/config";
 
 class ZKTeco extends EventEmitter {
   private clientSocket: net.Socket;
@@ -519,7 +520,7 @@ class ZKTeco extends EventEmitter {
 
 async function main() {
   const z = new ZKTeco();
-  await z.connect("10.20.0.199", 4370);
+  await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
   console.log("Connected");
 
   z.on("info", (info) => {
