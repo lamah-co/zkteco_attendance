@@ -363,6 +363,9 @@ class ZKTeco extends EventEmitter {
       case this.EF_ATTLOG:
         const data: Buffer = packet.data;
 
+        const user_id = data.toString("ascii", 0, 16).replace(/\u0000/g, "");
+        const attState = data.readUInt8(24);
+        const verify_type = data.readUInt8(25);
         const year = data.readUInt8(26) + 2000;
         const month = data.readUInt8(27);
         const day = data.readUInt8(28);
@@ -371,9 +374,9 @@ class ZKTeco extends EventEmitter {
         const second = data.readUInt8(31);
 
         const event = {
-          user_id: data.toString("ascii", 0, 16).replace(/\u0000/g, ""),
-          attState: data.readUInt8(24),
-          verify_type: data.readUInt8(25),
+          user_id,
+          attState,
+          verify_type,
           date: `${year}-${month}-${day} ${hour}:${minute}:${second}`,
         };
 
@@ -574,11 +577,18 @@ async function main() {
 
     await z.enableRealTime();
     z.on("attendance", (event) => {
+      console.log({ event });
       db.execute(
         "INSERT INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
         [event.date, event.user_id, event.verify_type],
+        function (err, results, fields) {
+          if (err) console.error(err);
+
+          console.log(results); // results contains rows returned by server
+          // If you execute same statement again, it will be picked from a LRU cache
+          // which will save query preparation time and give better performance
+        },
       );
-      console.log({ event });
     });
   };
 
