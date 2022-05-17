@@ -546,13 +546,29 @@ class ZKTeco extends EventEmitter {
 }
 
 async function main() {
-  const db = mysql.createConnection({
-    host: process.env.DB_HOST,
-    port: parseInt(process.env.DB_PORT),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-  });
+  let _mysqlConnection: mysql.Connection;
+
+  const getMysqlConnection = async () => {
+    const disconnected = async () => {
+      return new Promise((resolve) => {
+        _mysqlConnection.ping((err) => {
+          resolve(err ? true : false);
+        });
+      });
+    };
+
+    if (!_mysqlConnection || (await disconnected())) {
+      _mysqlConnection = mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: parseInt(process.env.DB_PORT),
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+      });
+    }
+
+    return _mysqlConnection;
+  };
 
   const z = new ZKTeco();
 
@@ -576,9 +592,10 @@ async function main() {
     await z.enableDevice();
 
     await z.enableRealTime();
-    z.on("attendance", (event) => {
+    z.on("attendance", async (event) => {
       console.log({ event });
-      db.execute(
+      const connection = await getMysqlConnection();
+      connection.execute(
         "INSERT INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
         [event.date, event.user_id, event.verify_type],
         function (err, results, fields) {
