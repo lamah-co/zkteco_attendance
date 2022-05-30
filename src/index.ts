@@ -596,7 +596,7 @@ async function main() {
       console.log({ event });
       const connection = await getMysqlConnection();
       connection.execute(
-        "INSERT INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
+        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
         [event.date, event.user_id, event.verify_type],
         function (err, results, fields) {
           if (err) console.error(err);
