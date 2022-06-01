@@ -4,6 +4,7 @@ import mysql from "mysql2";
 import "dotenv/config";
 
 class ZKTeco extends EventEmitter {
+  public isConnected = false;
   private wasConnected = false;
   private clientSocket: net.Socket;
   private session_id: number = 0;
@@ -288,6 +289,7 @@ class ZKTeco extends EventEmitter {
             this.bufferFromString("SDKBuild=1\0"),
             (res, err) => {
               if (err) return reject(err);
+              this.isConnected = true;
               return resolve();
             },
           );
@@ -300,17 +302,20 @@ class ZKTeco extends EventEmitter {
 
       this.clientSocket.on("error", (error) => {
         this.clientSocket.destroy();
+        this.isConnected = false;
         this.emit("error", error);
         console.log("Error: " + error);
       });
 
       this.clientSocket.on("connect", () => {
         this.wasConnected = true;
+        this.isConnected = true;
       });
 
       this.clientSocket.on("close", () => {
         if (this.wasConnected) {
           this.wasConnected = false;
+          this.isConnected = false;
           this.emit("close");
         }
       });
@@ -323,6 +328,7 @@ class ZKTeco extends EventEmitter {
         this.clientSocket.end();
         this.packetList = {};
         this.emit("disconnect");
+        this.isConnected = false;
         resolve();
       });
     });
@@ -614,6 +620,12 @@ async function main() {
       );
     });
   };
+
+  setInterval(() => {
+    if (z && z.isConnected) {
+      z.getSerialNumber();
+    }
+  }, 5000);
 
   process.on("uncaughtException", function (err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
