@@ -625,7 +625,7 @@ async function main() {
     if (z && z.isConnected) {
       z.getSerialNumber();
     }
-  }, 5000);
+  }, 10000);
 
   process.on("uncaughtException", function (err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
