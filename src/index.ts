@@ -274,6 +274,10 @@ class ZKTeco extends EventEmitter {
       this.clientSocket.setTimeout(3000);
       this.clientSocket.setKeepAlive(true);
       this.clientSocket.connect(port, address, () => {
+        if (this.session_id !== 0) {
+          this.disconnect();
+        }
+
         this.send_command(this.CMD_CONNECT, this.EMPTY_BUFFER, (res, err) => {
           this.session_id = res.session_code;
 
@@ -317,6 +321,7 @@ class ZKTeco extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => {
         this.clientSocket.end();
+        this.packetList = {};
         this.emit("disconnect");
         resolve();
       });
@@ -363,8 +368,9 @@ class ZKTeco extends EventEmitter {
       case this.EF_ATTLOG:
         const data: Buffer = packet.data;
 
-        const user_id = data.toString("ascii", 0, 16).replace(/\u0000/g, "");
-        const attState = data.readUInt8(24);
+        const user_id = data.toString("ascii", 0, 9).replace(/\u0000/g, "");
+
+        const att_state = data.readUInt8(24);
         const verify_type = data.readUInt8(25);
         const year = data.readUInt8(26) + 2000;
         const month = data.readUInt8(27);
@@ -375,7 +381,7 @@ class ZKTeco extends EventEmitter {
 
         const event = {
           user_id,
-          attState,
+          att_state,
           verify_type,
           date: `${year}-${month}-${day} ${hour}:${minute}:${second}`,
         };
@@ -597,7 +603,7 @@ async function main() {
       const connection = await getMysqlConnection();
       connection.execute(
         "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
-        [event.date, event.user_id, event.verify_type],
+        [event.date, event.user_id, event.att_state],
         function (err, results, fields) {
           if (err) console.error(err);
 
