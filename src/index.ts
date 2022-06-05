@@ -2,6 +2,27 @@ import net from "net";
 import { EventEmitter } from "events";
 import mysql from "mysql2";
 import "dotenv/config";
+import fs from "fs";
+
+const log = (...args: any[]) => {
+  console.log(...args);
+  fs.appendFileSync("./.log", `${JSON.stringify(args)}\n`);
+};
+
+interface ReturnedData {
+  data: Buffer;
+  finished: boolean;
+}
+
+interface Packet {
+  tag: Buffer;
+  size: number;
+  reply_code: number;
+  checksum: number;
+  session_code: number;
+  reply_counter: number;
+  data: Buffer;
+}
 
 class ZKTeco extends EventEmitter {
   public isConnected = false;
@@ -10,8 +31,6 @@ class ZKTeco extends EventEmitter {
   private session_id: number = 0;
   private reply_number: number = 0;
   private packetList = {};
-  // private last_reply_code: number = 0;
-  // private last_reply_number: number = 0;
   private internalBuffer: Buffer = Buffer.alloc(0);
 
   private USHORT_SIZE = 0xffff;
@@ -33,8 +52,11 @@ class ZKTeco extends EventEmitter {
   private CMD_FREE_DATA = 0x05de;
   private CMD_ENABLEDEVICE = 0x03ea;
   private CMD_DISABLEDEVICE = 0x03eb;
+  private CMD_ATTLOG_RRQ = 0x000d;
+  private CMD_GET_FREE_SIZES = 0x0032;
 
   private EF_ATTLOG = 1;
+  previousPacket: Packet;
 
   private debugPacket(packet: Buffer, direction: "SEND" | "RECV") {
     const reply_code = packet.readUInt16LE(8);
@@ -90,13 +112,19 @@ class ZKTeco extends EventEmitter {
       case this.CMD_DISABLEDEVICE:
         reply_code_str = "CMD_DISABLEDEVICE";
         break;
+      case this.CMD_ATTLOG_RRQ:
+        reply_code_str = "CMD_ATTLOG_RRQ";
+        break;
+      case this.CMD_GET_FREE_SIZES:
+        reply_code_str = "CMD_GET_FREE_SIZES";
+        break;
 
       default:
         reply_code_str = `UNKNOWN (0x${reply_code.toString(16)})`;
         break;
     }
 
-    console.log(
+    log(
       direction === "SEND" ? "SEND" : "RECV",
       `${direction === "SEND" ? "command" : "reply"}: ${reply_code_str}`,
       `checksum: ${checksum}`,
@@ -192,27 +220,37 @@ class ZKTeco extends EventEmitter {
 
     if (this.internalBuffer.length < 8) return;
 
-    if (!this.internalBuffer.slice(0, 4).equals(this.START_TAG)) {
-      this.internalBuffer = Buffer.from([]);
-      console.log("Invalid start tag");
-      return;
-    }
-
     while (this.internalBuffer.length >= 8) {
-      const packetSize = 8 + this.internalBuffer.readUInt16LE(4);
-      if (this.internalBuffer.length < packetSize) return;
+      if (!this.internalBuffer.slice(0, 4).equals(this.START_TAG)) {
+        if (this.previousPacket.reply_code === this.CMD_PREPARE_DATA) {
+          const temp = Buffer.concat([Buffer.alloc(16), this.internalBuffer]);
+          temp.writeUint16LE(this.previousPacket.reply_code, 8);
+          temp.writeUint16LE(this.previousPacket.reply_counter, 14);
+          this.handle_packet(temp);
+        } else {
+          log(
+            `Invalid start tag: ` +
+              this.internalBuffer.slice(0, 4).toString("hex"),
+          );
+        }
+        this.internalBuffer = Buffer.alloc(0);
+      } else {
+        const packetSize = 8 + this.internalBuffer.readUInt16LE(4);
+        if (this.internalBuffer.length < packetSize) return;
 
-      const packet = this.internalBuffer.slice(0, packetSize);
-      this.internalBuffer = this.internalBuffer.slice(packetSize);
+        const packet = this.internalBuffer.slice(0, packetSize);
+        this.internalBuffer = this.internalBuffer.slice(packetSize);
 
-      this.debugPacket(packet, "RECV");
-      this.handle_packet(packet);
+        this.debugPacket(packet, "RECV");
+        this.handle_packet(packet);
+      }
     }
   }
 
   private handle_packet(buffer: Buffer) {
-    const packet = {
+    const packet: Packet = {
       tag: buffer.slice(0, 4),
+      size: buffer.readUInt32LE(4),
       reply_code: buffer.readUInt16LE(8),
       checksum: buffer.readUInt16LE(10),
       session_code: buffer.readUInt16LE(12),
@@ -220,25 +258,7 @@ class ZKTeco extends EventEmitter {
       data: buffer.slice(16),
     };
 
-    // if (!packet.tag.equals(this.START_TAG)) {
-    //   if (
-    //     this.last_reply_code === this.CMD_PREPARE_DATA ||
-    //     this.last_reply_code === this.CMD_DATA
-    //   ) {
-    //     if (
-    //       typeof this.packetList[this.last_reply_number].callback === "function"
-    //     )
-    //       this.packetList[this.last_reply_number].callback({
-    //         reply_code: 0,
-    //         data: buffer,
-    //       });
-    //     return;
-    //   }
-    //   console.log("Invalid packet tag");
-    // } else {
-    //   this.last_reply_code = packet.reply_code;
-    //   this.last_reply_number = packet.reply_counter;
-    // }
+    this.previousPacket = packet;
 
     switch (packet.reply_code) {
       case this.CMD_ACK_OK:
@@ -304,7 +324,7 @@ class ZKTeco extends EventEmitter {
         this.clientSocket.destroy();
         this.isConnected = false;
         this.emit("error", error);
-        console.log("Error: " + error);
+        log("Error: " + error);
       });
 
       this.clientSocket.on("connect", () => {
@@ -397,62 +417,49 @@ class ZKTeco extends EventEmitter {
     }
   }
 
-  private async readLargeData(res): Promise<Buffer> {
-    let preparing = false;
+  private async readLargeData(res): Promise<ReturnedData> {
     return new Promise((resolve, reject) => {
-      let data: Buffer = Buffer.alloc(0);
-
+      if (res.reply_code === this.CMD_PREPARE_DATA) {
+        return resolve({ data: res.data, finished: false });
+      }
       if (res.reply_code === this.CMD_DATA) {
-        // device sent the dataset immediately, i.e. short dataset
-        data = res.data;
-        return resolve(data);
-      } else if (res.reply_code === this.CMD_PREPARE_DATA) {
-        // seen on fp template download procedure
-        // receives packet with long dataset
-        preparing = true;
-      } else if (res.reply_code === this.CMD_ACK_OK) {
+        return resolve({ data: res.data, finished: true });
+      } else {
+        if (res.reply_code !== this.CMD_ACK_OK) {
+          return reject("Invalid reply code");
+        }
+
         // device sent the dataset with additional commands, i.e. longer
         // dataset, see ex_data spec
         const sizeInfo = res.data.readUInt32LE(1);
 
         // creates data for "ready for data" command
-        const readyStruct = Buffer.alloc(8);
+        const readyStruct = Buffer.alloc(8, 0);
         readyStruct.writeUInt32LE(sizeInfo, 4);
 
-        let prepareReply = true;
+        let data = Buffer.alloc(0);
         this.send_command(this.CMD_DATA_RDY, readyStruct, (res, err) => {
           if (err) return reject(err);
 
-          // receives the prepare data reply
-          if (prepareReply) {
-            prepareReply = false;
-          } else {
-            // receives packet with long dataset
-            if (res.reply_code === this.CMD_DATA) {
-              data = Buffer.concat([data, res.data]);
-            } else {
-              this.send_command(this.CMD_FREE_DATA, this.EMPTY_BUFFER, () => {
-                return resolve(data);
-              });
+          if (res.reply_code === this.CMD_DATA) {
+            if (sizeInfo !== res.data.length) {
+              log("SIZE NOT MATCHING: " + sizeInfo + " " + res.data.length);
             }
+            data = Buffer.concat([data, res.data]);
+          }
+
+          if (res.reply_code === this.CMD_ACK_OK) {
+            this.send_command(this.CMD_FREE_DATA, this.EMPTY_BUFFER, () => {
+              return resolve({ data, finished: true });
+            });
           }
         });
-      }
-
-      if (preparing) {
-        if (res.reply_code !== this.CMD_ACK_OK) {
-          // receives packet with long dataset
-          data = res.data;
-        } else {
-          // receives the acknowledge after the dataset packet
-          return resolve(data);
-        }
       }
     });
   }
 
   public async readAllUserIds(): Promise<any> {
-    let preparing = false;
+    let temp = Buffer.alloc(0);
     return new Promise((resolve, reject) => {
       this.send_command(
         this.CMD_DATA_WRRQ,
@@ -461,7 +468,10 @@ class ZKTeco extends EventEmitter {
           if (err) return reject(err);
 
           this.readLargeData(res).then((data) => {
-            return resolve(this.parseUsers(data));
+            temp = Buffer.concat([temp, data.data]);
+            if (data.finished) {
+              return resolve(this.parseUsers(temp));
+            }
           });
         },
       );
@@ -555,6 +565,93 @@ class ZKTeco extends EventEmitter {
       );
     });
   }
+
+  public async readAttLog(): Promise<any> {
+    let temp = Buffer.alloc(0);
+    return new Promise((resolve, reject) => {
+      this.send_command(this.CMD_ATTLOG_RRQ, this.EMPTY_BUFFER, (res, err) => {
+        if (err) return reject(err);
+
+        this.readLargeData(res).then(async (data) => {
+          temp = Buffer.concat([temp, data.data]);
+          if (data.finished) {
+            const attLog = await this.parseAttLog(temp);
+            log(`count: ${attLog.length}`);
+
+            return resolve(attLog);
+          }
+        });
+      });
+    });
+  }
+
+  public async readRecords(): Promise<number> {
+    return new Promise((resolve, reject) => {
+      this.send_command(
+        this.CMD_GET_FREE_SIZES,
+        this.EMPTY_BUFFER,
+        (res, err) => {
+          if (err) return reject(err);
+
+          const records = res.data.readUInt32LE(64);
+          log("records", records);
+
+          return resolve(records);
+        },
+      );
+    });
+  }
+
+  private async parseAttLog(data: Buffer): Promise<any> {
+    const attLog = [];
+
+    data = data.slice(20);
+
+    while (data.length >= 40) {
+      const uid = data.readUInt16LE(0);
+      let user_id = data.toString("ascii", 2, 26).replace(/\0/g, "");
+      // user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
+      const status = data.readUInt8(26);
+      let t = data.readUint32LE(27);
+      let s = t % 60;
+      t = Math.floor(t / 60);
+      let m = t % 60;
+      t = Math.floor(t / 60);
+      let h = t % 24;
+      t = Math.floor(t / 24);
+      const d = (t % 31) + 1;
+      t = Math.floor(t / 31);
+      const mth = (t % 12) + 1;
+      t = Math.floor(t / 12);
+      const y = t + 2000;
+      const timestamp = `${y}-${mth}-${d} ${h}:${m}:${s}`;
+
+      const punch = data.readUInt8(31);
+      const space = data.toString("ascii", 32, 40).replace(/\0/g, "");
+
+      data = data.slice(40);
+      attLog.push({ uid, user_id, status, timestamp, punch, space });
+    }
+
+    return attLog;
+  }
+
+  public async checkConnection(): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      let timeout = setTimeout(() => {
+        return resolve(false);
+      }, 3000);
+
+      this.send_command(
+        this.CMD_OPTIONS_RRQ,
+        this.bufferFromString("~SerialNumber\0"),
+        (res) => {
+          clearTimeout(timeout);
+          return resolve(true);
+        },
+      );
+    });
+  }
 }
 
 async function main() {
@@ -584,36 +681,37 @@ async function main() {
 
   const z = new ZKTeco();
 
-  z.on("info", (info) => {
-    console.log({ info });
-  });
-
   z.on("close", () => {
     connect();
-    console.log("reconnecting...");
+    log("reconnecting...");
   });
 
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
-    console.log("Connected");
+    log("Connected");
 
     await z.disableDevice();
     const users = await z.readAllUserIds();
-    // console.log({ users });
-    console.log(`Users Count: ${Object.keys(users).length}`);
+    // log({ users });
+    log(`Users Count: ${Object.keys(users).length}`);
+    log(await z.readAttLog());
+
     await z.enableDevice();
 
     await z.enableRealTime();
     z.on("attendance", async (event) => {
-      console.log({ event });
+      log({
+        rnd: Math.random(),
+        event,
+      });
       const connection = await getMysqlConnection();
       connection.execute(
         "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
         [event.date, event.user_id, event.att_state],
         function (err, results, fields) {
-          if (err) console.error(err);
+          if (err) log(err);
 
-          console.log(results); // results contains rows returned by server
+          log(results); // results contains rows returned by server
           // If you execute same statement again, it will be picked from a LRU cache
           // which will save query preparation time and give better performance
         },
@@ -621,15 +719,16 @@ async function main() {
     });
   };
 
-  setInterval(() => {
-    if (z && z.isConnected) {
-      z.getSerialNumber();
+  setInterval(async () => {
+    if (z && z.isConnected && !(await z.checkConnection())) {
+      await z.disconnect();
+      await connect();
     }
   }, 10000);
 
   process.on("uncaughtException", function (err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
-      console.log("Connection timed out, reconnecting...");
+      log("Connection timed out, reconnecting...");
       connect();
     }
   });
