@@ -720,7 +720,9 @@ async function main() {
   setInterval(async () => {
     if (!z.isConnected || !(await z.checkConnection())) {
       log("trying to connect...");
-      await z.disconnect();
+      if (z.isConnected) {
+        await z.disconnect();
+      }
       await connect();
     }
   }, 10000);
