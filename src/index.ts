@@ -603,6 +603,7 @@ class ZKTeco extends EventEmitter {
   }
 
   private async parseAttLog(data: Buffer): Promise<any> {
+    // log("parseAttLog", data.toString("hex"));
     const attLog = [];
 
     data = data.slice(20);
@@ -681,7 +682,8 @@ async function main() {
 
   const z = new ZKTeco();
 
-  z.on("close", () => {
+  z.on("close", async () => {
+    await z.disconnect();
     connect();
     log("reconnecting...");
   });
