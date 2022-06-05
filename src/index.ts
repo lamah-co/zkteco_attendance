@@ -343,15 +343,11 @@ class ZKTeco extends EventEmitter {
   }
 
   public async disconnect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => {
-        this.clientSocket.end();
-        this.packetList = {};
-        this.emit("disconnect");
-        this.isConnected = false;
-        resolve();
-      });
-    });
+    this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => {});
+    this.clientSocket.end();
+    this.packetList = {};
+    this.emit("disconnect");
+    this.isConnected = false;
   }
 
   private async getDeviceInfo(param_name: string): Promise<string> {
