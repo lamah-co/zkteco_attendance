@@ -641,7 +641,7 @@ class ZKTeco extends EventEmitter {
     return new Promise((resolve, reject) => {
       let timeout = setTimeout(() => {
         return resolve(false);
-      }, 3000);
+      }, 8000);
 
       this.send_command(
         this.CMD_OPTIONS_RRQ,
