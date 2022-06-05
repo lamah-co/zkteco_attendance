@@ -694,7 +694,7 @@ async function main() {
     const users = await z.readAllUserIds();
     // log({ users });
     log(`Users Count: ${Object.keys(users).length}`);
-    log(await z.readAttLog());
+    // log(await z.readAttLog());
 
     await z.enableDevice();
 
