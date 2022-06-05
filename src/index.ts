@@ -718,7 +718,8 @@ async function main() {
   };
 
   setInterval(async () => {
-    if (z && z.isConnected && !(await z.checkConnection())) {
+    if (!z.isConnected || !(await z.checkConnection())) {
+      log("trying to connect...");
       await z.disconnect();
       await connect();
     }
@@ -728,6 +729,12 @@ async function main() {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
       log("Connection timed out, reconnecting...");
       connect();
+    }
+  });
+
+  process.on("SIGKILL", async () => {
+    if (z && z.isConnected) {
+      await z.disconnect();
     }
   });
 
