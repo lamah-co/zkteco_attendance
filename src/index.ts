@@ -3,6 +3,7 @@ import { EventEmitter } from "events";
 import mysql from "mysql2";
 import "dotenv/config";
 import fs from "fs";
+import cron from "node-cron";
 
 const log = (...args: any[]) => {
   console.log(...args);
@@ -606,6 +607,11 @@ class ZKTeco extends EventEmitter {
 
     while (data.length >= 40) {
       const uid = data.readUInt16LE(0);
+      if (uid === 0) {
+        // skip empty values
+        data = data.slice(2);
+        continue;
+      }
       let user_id = data.toString("ascii", 2, 26).replace(/\0/g, "");
       // user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
       const status = data.readUInt8(26);
@@ -637,7 +643,7 @@ class ZKTeco extends EventEmitter {
     return new Promise((resolve, reject) => {
       let timeout = setTimeout(() => {
         return resolve(false);
-      }, 8000);
+      }, 10000);
 
       this.send_command(
         this.CMD_OPTIONS_RRQ,
@@ -678,11 +684,11 @@ async function main() {
 
   const z = new ZKTeco();
 
-  z.on("close", async () => {
-    await z.disconnect();
-    connect();
-    log("reconnecting...");
-  });
+  // z.on("close", async () => {
+  //   await z.disconnect();
+  //   connect();
+  //   log("reconnecting...");
+  // });
 
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
@@ -692,8 +698,6 @@ async function main() {
     const users = await z.readAllUserIds();
     // log({ users });
     log(`Users Count: ${Object.keys(users).length}`);
-    // log(await z.readAttLog());
-
     await z.enableDevice();
 
     await z.enableRealTime();
@@ -717,7 +721,7 @@ async function main() {
     });
   };
 
-  setInterval(async () => {
+  let connectionCheckInterval = setInterval(async () => {
     if (!z.isConnected || !(await z.checkConnection())) {
       log("trying to connect...");
       if (z.isConnected) {
@@ -725,22 +729,52 @@ async function main() {
       }
       await connect();
     }
-  }, 10000);
+  }, 30000);
 
   process.on("uncaughtException", function (err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
       log("Connection timed out, reconnecting...");
-      connect();
+      // connect();
     }
   });
 
-  process.on("SIGKILL", async () => {
+  process.on("SIGINT", async () => {
+    console.log("Caught interrupt signal");
+    clearInterval(connectionCheckInterval);
     if (z && z.isConnected) {
       await z.disconnect();
+      // wait promise 1000ms for disconnection
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    process.exit();
   });
 
   await connect();
+
+  // sync database every day at 01:00 AM
+  cron.schedule("0 0 1 * * *", async () => {
+    await z.disableDevice();
+    let attLog = [];
+    try {
+      attLog = await z.readAttLog();
+    } finally {
+      await z.enableDevice();
+    }
+    for (const att of attLog) {
+      const connection = await getMysqlConnection();
+      connection.execute(
+        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
+        [att.timestamp, att.user_id, att.status],
+        function (err, results, fields) {
+          if (err) log(err);
+
+          // log(results); // results contains rows returned by server
+          // If you execute same statement again, it will be picked from a LRU cache
+          // which will save query preparation time and give better performance
+        },
+      );
+    }
+  });
 }
 
 main();
