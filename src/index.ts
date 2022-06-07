@@ -690,35 +690,37 @@ async function main() {
   //   log("reconnecting...");
   // });
 
+  z.on("attendance", async (event) => {
+    log({
+      rnd: Math.random(),
+      event,
+    });
+    const connection = await getMysqlConnection();
+    connection.execute(
+      "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
+      [event.date, event.user_id, event.att_state],
+      function (err, results, fields) {
+        if (err) log(err);
+
+        log(results); // results contains rows returned by server
+        // If you execute same statement again, it will be picked from a LRU cache
+        // which will save query preparation time and give better performance
+      },
+    );
+  });
+
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
     log("Connected");
 
     await z.disableDevice();
-    const users = await z.readAllUserIds();
-    // log({ users });
-    log(`Users Count: ${Object.keys(users).length}`);
-    await z.enableDevice();
-
+    try {
+      const users = await z.readAllUserIds();
+      log(`Users Count: ${Object.keys(users).length}`);
+    } finally {
+      await z.enableDevice();
+    }
     await z.enableRealTime();
-    z.on("attendance", async (event) => {
-      log({
-        rnd: Math.random(),
-        event,
-      });
-      const connection = await getMysqlConnection();
-      connection.execute(
-        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
-        [event.date, event.user_id, event.att_state],
-        function (err, results, fields) {
-          if (err) log(err);
-
-          log(results); // results contains rows returned by server
-          // If you execute same statement again, it will be picked from a LRU cache
-          // which will save query preparation time and give better performance
-        },
-      );
-    });
   };
 
   let connectionCheckInterval = setInterval(async () => {
