@@ -55,8 +55,6 @@ class ZKTeco extends EventEmitter {
   private CMD_DISABLEDEVICE = 0x03eb;
   private CMD_ATTLOG_RRQ = 0x000d;
   private CMD_GET_FREE_SIZES = 0x0032;
-  private CMD_GET_TIME = 0x00c9;
-  private CMD_SET_TIME = 0x00ca;
 
   private EF_ATTLOG = 1;
   previousPacket: Packet;
@@ -120,12 +118,6 @@ class ZKTeco extends EventEmitter {
         break;
       case this.CMD_GET_FREE_SIZES:
         reply_code_str = "CMD_GET_FREE_SIZES";
-        break;
-      case this.CMD_GET_TIME:
-        reply_code_str = "CMD_GET_TIME";
-        break;
-      case this.CMD_SET_TIME:
-        reply_code_str = "CMD_SET_TIME";
         break;
 
       default:
@@ -607,35 +599,6 @@ class ZKTeco extends EventEmitter {
     });
   }
 
-  public decodeTime(time: number): string {
-    let t = time;
-    let s = t % 60;
-    t = Math.floor(t / 60);
-    let m = t % 60;
-    t = Math.floor(t / 60);
-    let h = t % 24;
-    t = Math.floor(t / 24);
-    const d = (t % 31) + 1;
-    t = Math.floor(t / 31);
-    const mth = (t % 12) + 1;
-    t = Math.floor(t / 12);
-    const y = t + 2000;
-    const timestamp = `${y}-${mth}-${d} ${h}:${m}:${s}`;
-    return timestamp;
-  }
-
-  public encodeTime(time: Date): number {
-    const d =
-      ((time.getFullYear() % 100) * 12 * 31 +
-        time.getMonth() * 31 +
-        time.getDate() -
-        1) *
-        (24 * 60 * 60) +
-      (time.getHours() * 60 + time.getMinutes()) * 60 +
-      time.getSeconds();
-    return d;
-  }
-
   private async parseAttLog(data: Buffer): Promise<any> {
     // log("parseAttLog", data.toString("hex"));
     const attLog = [];
@@ -652,7 +615,19 @@ class ZKTeco extends EventEmitter {
       let user_id = data.toString("ascii", 2, 26).replace(/\0/g, "");
       // user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
       const status = data.readUInt8(26);
-      const timestamp = this.decodeTime(data.readUint32LE(27));
+      let t = data.readUint32LE(27);
+      let s = t % 60;
+      t = Math.floor(t / 60);
+      let m = t % 60;
+      t = Math.floor(t / 60);
+      let h = t % 24;
+      t = Math.floor(t / 24);
+      const d = (t % 31) + 1;
+      t = Math.floor(t / 31);
+      const mth = (t % 12) + 1;
+      t = Math.floor(t / 12);
+      const y = t + 2000;
+      const timestamp = `${y}-${mth}-${d} ${h}:${m}:${s}`;
 
       const punch = data.readUInt8(31);
       const space = data.toString("ascii", 32, 40).replace(/\0/g, "");
@@ -678,28 +653,6 @@ class ZKTeco extends EventEmitter {
           return resolve(true);
         },
       );
-    });
-  }
-
-  public async getDeviceTime(): Promise<string> {
-    return new Promise((resolve, reject) => {
-      this.send_command(this.CMD_GET_TIME, this.EMPTY_BUFFER, (res, err) => {
-        if (err) return reject(err);
-        const timestamp = this.decodeTime(res.data.readUInt32LE(0));
-        return resolve(timestamp);
-      });
-    });
-  }
-
-  public async setDeviceTime(timestamp: Date): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const data = this.encodeTime(timestamp);
-      const buffer = Buffer.alloc(4);
-      buffer.writeUInt32LE(data, 0);
-      this.send_command(this.CMD_SET_TIME, buffer, (res, err) => {
-        if (err) return reject(err);
-        return resolve(res);
-      });
     });
   }
 }
@@ -802,6 +755,7 @@ async function main() {
 
   // sync database every day at 01:00 AM
   cron.schedule("0 0 1 * * *", async () => {
+    log('synching attendance log');
     await z.disableDevice();
     let attLog = [];
     try {
@@ -823,6 +777,7 @@ async function main() {
         },
       );
     }
+    log('finished synching');
   });
 }
 
