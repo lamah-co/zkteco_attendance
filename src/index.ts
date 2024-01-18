@@ -205,8 +205,8 @@ class ZKTeco extends EventEmitter {
   private send_command(command: number, data: Buffer, callback) {
     this.reply_number =
       command === this.CMD_CONNECT ||
-      command === this.CMD_ACK_OK ||
-      command === this.CMD_ACK_UNAUTH
+        command === this.CMD_ACK_OK ||
+        command === this.CMD_ACK_UNAUTH
         ? 0
         : (this.reply_number + 1) % this.USHORT_SIZE;
     const packet = this.create_packet(command, data);
@@ -239,7 +239,7 @@ class ZKTeco extends EventEmitter {
         } else {
           log(
             `Invalid start tag: ` +
-              this.internalBuffer.slice(0, 4).toString("hex"),
+            this.internalBuffer.slice(0, 4).toString("hex"),
           );
         }
         this.internalBuffer = Buffer.alloc(0);
@@ -352,7 +352,7 @@ class ZKTeco extends EventEmitter {
   }
 
   public async disconnect(): Promise<void> {
-    this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => {});
+    this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => { });
     this.clientSocket.end();
     this.packetList = {};
     this.emit("disconnect");
@@ -630,7 +630,7 @@ class ZKTeco extends EventEmitter {
         time.getMonth() * 31 +
         time.getDate() -
         1) *
-        (24 * 60 * 60) +
+      (24 * 60 * 60) +
       (time.getHours() * 60 + time.getMinutes()) * 60 +
       time.getSeconds();
     return d;
@@ -758,7 +758,7 @@ async function main() {
     connection.execute(
       "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
       [event.date, event.user_id, event.att_state],
-      function (err, results, fields) {
+      function(err, results, fields) {
         if (err) log(err);
 
         log(results); // results contains rows returned by server
@@ -767,6 +767,32 @@ async function main() {
       },
     );
   });
+
+  let sync = async () => {
+    log('synching attendance log');
+    await z.disableDevice();
+    let attLog = [];
+    try {
+      attLog = await z.readAttLog();
+    } finally {
+      await z.enableDevice();
+    }
+    for (const att of attLog) {
+      const connection = await getMysqlConnection();
+      connection.execute(
+        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
+        [att.timestamp, att.user_id, att.status],
+        function(err, results, fields) {
+          if (err) log(err);
+
+          // log(results); // results contains rows returned by server
+          // If you execute same statement again, it will be picked from a LRU cache
+          // which will save query preparation time and give better performance
+        },
+      );
+    }
+    log('finished synching');
+  }
 
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
@@ -780,6 +806,9 @@ async function main() {
       await z.enableDevice();
     }
     await z.enableRealTime();
+
+    // start synching
+    await sync();
   };
 
   let connectionCheckInterval = setInterval(async () => {
@@ -792,7 +821,7 @@ async function main() {
     }
   }, 30000);
 
-  process.on("uncaughtException", function (err: any) {
+  process.on("uncaughtException", function(err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
       log("Connection timed out, reconnecting...");
       // connect();
@@ -813,31 +842,7 @@ async function main() {
   await connect();
 
   // sync database every day at 01:00 AM
-  cron.schedule("0 0 1 * * *", async () => {
-    log('synching attendance log');
-    await z.disableDevice();
-    let attLog = [];
-    try {
-      attLog = await z.readAttLog();
-    } finally {
-      await z.enableDevice();
-    }
-    for (const att of attLog) {
-      const connection = await getMysqlConnection();
-      connection.execute(
-        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
-        [att.timestamp, att.user_id, att.status],
-        function (err, results, fields) {
-          if (err) log(err);
-
-          // log(results); // results contains rows returned by server
-          // If you execute same statement again, it will be picked from a LRU cache
-          // which will save query preparation time and give better performance
-        },
-      );
-    }
-    log('finished synching');
-  });
+  cron.schedule("0 0 1 * * *", sync);
 }
 
 main();
