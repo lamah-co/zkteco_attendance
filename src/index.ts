@@ -7,7 +7,7 @@ import cron from "node-cron";
 
 const log = (...args: any[]) => {
   console.log(...args);
-  fs.appendFileSync("./.log", `${JSON.stringify(args)}\n`);
+  // fs.appendFileSync("./.log", `${JSON.stringify(args)}\n`);
 };
 
 interface ReturnedData {
@@ -57,9 +57,9 @@ class ZKTeco extends EventEmitter {
   private CMD_GET_FREE_SIZES = 0x0032;
   private CMD_GET_TIME = 0x00c9;
   private CMD_SET_TIME = 0x00ca;
+  private CMD_RESTART = 0x03ec;
 
   private EF_ATTLOG = 1;
-  previousPacket: Packet;
 
   private debugPacket(packet: Buffer, direction: "SEND" | "RECV") {
     const reply_code = packet.readUInt16LE(8);
@@ -127,6 +127,9 @@ class ZKTeco extends EventEmitter {
       case this.CMD_SET_TIME:
         reply_code_str = "CMD_SET_TIME";
         break;
+      case this.CMD_RESTART:
+        reply_code_str = "CMD_RESTART";
+        break;
 
       default:
         reply_code_str = `UNKNOWN (0x${reply_code.toString(16)})`;
@@ -149,6 +152,9 @@ class ZKTeco extends EventEmitter {
 
     if (payload.length % 2 === 1)
       payload = Buffer.concat([payload, Buffer.from([0x00])]);
+
+    // exclude checksum field
+    payload.writeUInt16LE(0x00, 2);
 
     while (j < payload.length) {
       // extract short integer, in little endian, from payload
@@ -205,8 +211,8 @@ class ZKTeco extends EventEmitter {
   private send_command(command: number, data: Buffer, callback) {
     this.reply_number =
       command === this.CMD_CONNECT ||
-        command === this.CMD_ACK_OK ||
-        command === this.CMD_ACK_UNAUTH
+      command === this.CMD_ACK_OK ||
+      command === this.CMD_ACK_UNAUTH
         ? 0
         : (this.reply_number + 1) % this.USHORT_SIZE;
     const packet = this.create_packet(command, data);
@@ -225,34 +231,17 @@ class ZKTeco extends EventEmitter {
   }
 
   private read(buffer: Buffer) {
+    // log2(buffer.toString("hex"));
+
     this.internalBuffer = Buffer.concat([this.internalBuffer, buffer]);
 
-    if (this.internalBuffer.length < 8) return;
-
     while (this.internalBuffer.length >= 8) {
-      if (!this.internalBuffer.slice(0, 4).equals(this.START_TAG)) {
-        if (this.previousPacket.reply_code === this.CMD_PREPARE_DATA) {
-          const temp = Buffer.concat([Buffer.alloc(16), this.internalBuffer]);
-          temp.writeUint16LE(this.previousPacket.reply_code, 8);
-          temp.writeUint16LE(this.previousPacket.reply_counter, 14);
-          this.handle_packet(temp);
-        } else {
-          log(
-            `Invalid start tag: ` +
-            this.internalBuffer.slice(0, 4).toString("hex"),
-          );
-        }
-        this.internalBuffer = Buffer.alloc(0);
-      } else {
-        const packetSize = 8 + this.internalBuffer.readUInt16LE(4);
-        if (this.internalBuffer.length < packetSize) return;
-
-        const packet = this.internalBuffer.slice(0, packetSize);
-        this.internalBuffer = this.internalBuffer.slice(packetSize);
-
-        this.debugPacket(packet, "RECV");
-        this.handle_packet(packet);
-      }
+      const packet_size = 8 + this.internalBuffer.readInt32LE(4);
+      if (packet_size > this.internalBuffer.length) break;
+      const packet = this.internalBuffer.slice(0, packet_size);
+      this.internalBuffer = this.internalBuffer.slice(packet_size);
+      this.debugPacket(packet, "RECV");
+      this.handle_packet(packet);
     }
   }
 
@@ -267,7 +256,16 @@ class ZKTeco extends EventEmitter {
       data: buffer.slice(16),
     };
 
-    this.previousPacket = packet;
+    // check checksum
+    const chk = this.checksum16(buffer.slice(8));
+    if (chk !== packet.checksum) {
+      log(
+        `Invalid checksum: ${chk.toString(16)} != ${packet.checksum.toString(
+          16,
+        )}`,
+      );
+      // return;
+    }
 
     switch (packet.reply_code) {
       case this.CMD_ACK_OK:
@@ -291,7 +289,7 @@ class ZKTeco extends EventEmitter {
           packet,
         };
         this.packetList[packet.reply_counter].callback(packet, error);
-        this.emit("info", error);
+        log("Unknown command: " + packet.reply_code.toString(16));
         break;
     }
   }
@@ -352,11 +350,16 @@ class ZKTeco extends EventEmitter {
   }
 
   public async disconnect(): Promise<void> {
-    this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => { });
-    this.clientSocket.end();
-    this.packetList = {};
-    this.emit("disconnect");
-    this.isConnected = false;
+    return new Promise((resolve, reject) => {
+      this.send_command(this.CMD_DISCONNECT, Buffer.from([]), async () => {
+        this.clientSocket.end();
+        this.packetList = {};
+        this.emit("disconnect");
+        this.isConnected = false;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        resolve();
+      });
+    });
   }
 
   private async getDeviceInfo(param_name: string): Promise<string> {
@@ -422,65 +425,11 @@ class ZKTeco extends EventEmitter {
     }
   }
 
-  private async readLargeData(res): Promise<ReturnedData> {
-    return new Promise((resolve, reject) => {
-      if (res.reply_code === this.CMD_PREPARE_DATA) {
-        return resolve({ data: res.data, finished: false });
-      }
-      if (res.reply_code === this.CMD_DATA) {
-        return resolve({ data: res.data, finished: true });
-      } else {
-        if (res.reply_code !== this.CMD_ACK_OK) {
-          return reject("Invalid reply code");
-        }
-
-        // device sent the dataset with additional commands, i.e. longer
-        // dataset, see ex_data spec
-        const sizeInfo = res.data.readUInt32LE(1);
-
-        // creates data for "ready for data" command
-        const readyStruct = Buffer.alloc(8, 0);
-        readyStruct.writeUInt32LE(sizeInfo, 4);
-
-        let data = Buffer.alloc(0);
-        this.send_command(this.CMD_DATA_RDY, readyStruct, (res, err) => {
-          if (err) return reject(err);
-
-          if (res.reply_code === this.CMD_DATA) {
-            if (sizeInfo !== res.data.length) {
-              log("SIZE NOT MATCHING: " + sizeInfo + " " + res.data.length);
-            }
-            data = Buffer.concat([data, res.data]);
-          }
-
-          if (res.reply_code === this.CMD_ACK_OK) {
-            this.send_command(this.CMD_FREE_DATA, this.EMPTY_BUFFER, () => {
-              return resolve({ data, finished: true });
-            });
-          }
-        });
-      }
-    });
-  }
-
   public async readAllUserIds(): Promise<any> {
-    let temp = Buffer.alloc(0);
-    return new Promise((resolve, reject) => {
-      this.send_command(
-        this.CMD_DATA_WRRQ,
-        Buffer.from("0109000500000000000000", "hex"),
-        (res, err) => {
-          if (err) return reject(err);
-
-          this.readLargeData(res).then((data) => {
-            temp = Buffer.concat([temp, data.data]);
-            if (data.finished) {
-              return resolve(this.parseUsers(temp));
-            }
-          });
-        },
-      );
-    });
+    let buffer = await this.readLargeData(
+      Buffer.from("0109000500000000000000", "hex"),
+    );
+    return this.parseUsers(buffer);
   }
 
   private parseUsers(data: Buffer): any {
@@ -571,23 +520,66 @@ class ZKTeco extends EventEmitter {
     });
   }
 
-  public async readAttLog(): Promise<any> {
-    let temp = Buffer.alloc(0);
+  private async readLargeData(command_payload: Buffer): Promise<Buffer> {
+    let first = true;
+    let buffer = Buffer.alloc(0);
     return new Promise((resolve, reject) => {
-      this.send_command(this.CMD_ATTLOG_RRQ, this.EMPTY_BUFFER, (res, err) => {
+      this.send_command(this.CMD_DATA_WRRQ, command_payload, (res, err) => {
         if (err) return reject(err);
 
-        this.readLargeData(res).then(async (data) => {
-          temp = Buffer.concat([temp, data.data]);
-          if (data.finished) {
-            const attLog = await this.parseAttLog(temp);
-            log(`count: ${attLog.length}`);
-
-            return resolve(attLog);
+        if (res.reply_code === this.CMD_DATA && first) {
+          // Small dataset in one packet
+          return resolve(res.data);
+        } else {
+          // Large dataset
+          if (first && res.reply_code !== this.CMD_ACK_OK) {
+            return reject("Invalid data");
           }
-        });
+
+          const size_dataset1 = res.data.readUInt32LE(1);
+          const size_dataset2 = res.data.readUInt32LE(5);
+          if (size_dataset1 !== size_dataset2) {
+            return reject("Size not matching");
+          }
+
+          const rdy = Buffer.alloc(8);
+          rdy.writeUInt32LE(size_dataset1, 4);
+
+          this.send_command(this.CMD_DATA_RDY, rdy, (res, err) => {
+            if (err) return reject(err);
+
+            if (res.reply_code === this.CMD_PREPARE_DATA) {
+              // Do nothing, it just returns data size
+            }
+
+            if (res.reply_code === this.CMD_DATA) {
+              buffer = Buffer.concat([buffer, res.data]);
+            }
+
+            if (res.reply_code === this.CMD_ACK_OK) {
+              log("Data received. Size: " + buffer.length);
+
+              this.send_command(
+                this.CMD_FREE_DATA,
+                this.EMPTY_BUFFER,
+                (res, err) => {
+                  return resolve(buffer);
+                },
+              );
+            }
+          });
+        }
+
+        first = false;
       });
     });
+  }
+
+  public async readAttendance(): Promise<any> {
+    let buffer = await this.readLargeData(
+      Buffer.from("010d000000000000000000", "hex"),
+    );
+    return this.parseAttLog(buffer);
   }
 
   public async readRecords(): Promise<number> {
@@ -630,25 +622,22 @@ class ZKTeco extends EventEmitter {
         time.getMonth() * 31 +
         time.getDate() -
         1) *
-      (24 * 60 * 60) +
+        (24 * 60 * 60) +
       (time.getHours() * 60 + time.getMinutes()) * 60 +
       time.getSeconds();
     return d;
   }
 
-  private async parseAttLog(data: Buffer): Promise<any> {
+  private parseAttLog(data: Buffer): any {
     // log("parseAttLog", data.toString("hex"));
     const attLog = [];
+    log("Parsing records");
 
-    data = data.slice(20);
+    data = data.slice(4);
 
     while (data.length >= 40) {
       const uid = data.readUInt16LE(0);
-      if (uid === 0) {
-        // skip empty values
-        data = data.slice(2);
-        continue;
-      }
+
       let user_id = data.toString("ascii", 2, 26).replace(/\0/g, "");
       // user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
       const status = data.readUInt8(26);
@@ -670,7 +659,8 @@ class ZKTeco extends EventEmitter {
       const space = data.toString("ascii", 32, 40).replace(/\0/g, "");
 
       data = data.slice(40);
-      attLog.push({ uid, user_id, status, timestamp, punch, space });
+      const record = { uid, user_id, status, timestamp, punch, space };
+      attLog.push(record);
     }
 
     return attLog;
@@ -714,6 +704,12 @@ class ZKTeco extends EventEmitter {
       });
     });
   }
+
+  public async restartDevice(): Promise<void> {
+    // The device will not acknowledge the restart command, so we just send it and wait for a few seconds
+    this.send_command(this.CMD_RESTART, this.EMPTY_BUFFER, () => {});
+    await new Promise((resolve) => setTimeout(resolve, 20000));
+  }
 }
 
 async function main() {
@@ -743,11 +739,11 @@ async function main() {
 
   const z = new ZKTeco();
 
-  // z.on("close", async () => {
-  //   await z.disconnect();
-  //   connect();
-  //   log("reconnecting...");
-  // });
+  z.on("close", async () => {
+    await z.disconnect();
+    connect();
+    log("reconnecting...");
+  });
 
   z.on("attendance", async (event) => {
     log({
@@ -758,7 +754,7 @@ async function main() {
     connection.execute(
       "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
       [event.date, event.user_id, event.att_state],
-      function(err, results, fields) {
+      function (err, results, fields) {
         if (err) log(err);
 
         log(results); // results contains rows returned by server
@@ -769,11 +765,11 @@ async function main() {
   });
 
   let sync = async () => {
-    log('synching attendance log');
+    log("synching attendance log");
     await z.disableDevice();
     let attLog = [];
     try {
-      attLog = await z.readAttLog();
+      attLog = await z.readAttendance();
     } finally {
       await z.enableDevice();
     }
@@ -782,7 +778,7 @@ async function main() {
       connection.execute(
         "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
         [att.timestamp, att.user_id, att.status],
-        function(err, results, fields) {
+        function (err, results, fields) {
           if (err) log(err);
 
           // log(results); // results contains rows returned by server
@@ -791,8 +787,8 @@ async function main() {
         },
       );
     }
-    log('finished synching');
-  }
+    log("finished synching");
+  };
 
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
@@ -802,6 +798,8 @@ async function main() {
     try {
       const users = await z.readAllUserIds();
       log(`Users Count: ${Object.keys(users).length}`);
+    } catch (error) {
+      log("Error reading users: ", error);
     } finally {
       await z.enableDevice();
     }
@@ -821,7 +819,7 @@ async function main() {
     }
   }, 30000);
 
-  process.on("uncaughtException", function(err: any) {
+  process.on("uncaughtException", function (err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
       log("Connection timed out, reconnecting...");
       // connect();
@@ -829,7 +827,7 @@ async function main() {
   });
 
   process.on("SIGINT", async () => {
-    console.log("Caught interrupt signal");
+    log("Caught interrupt signal");
     clearInterval(connectionCheckInterval);
     if (z && z.isConnected) {
       await z.disconnect();
@@ -839,10 +837,27 @@ async function main() {
     process.exit();
   });
 
+  process.on("exit", async () => {
+    log("Exiting...");
+    clearInterval(connectionCheckInterval);
+    if (z && z.isConnected) {
+      await z.disconnect();
+      // wait promise 1000ms for disconnection
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  });
+
   await connect();
+
+  // setTimeout(() => {
+  //   // restart
+  //   z.restartDevice();
+  // }, 10000);
 
   // sync database every day at 01:00 AM
   cron.schedule("0 0 1 * * *", sync);
+  // Restart device every day at 06:00 AM
+  cron.schedule("0 0 6 * * *", z.restartDevice);
 }
 
 main();
