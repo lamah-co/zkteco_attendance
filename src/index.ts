@@ -142,7 +142,7 @@ class ZKTeco extends EventEmitter {
       `checksum: ${checksum}`,
       `session_code: ${session_code}`,
       `reply_id: ${reply_counter}`,
-      `data: ${data.toString("hex")}`,
+      `data: ${data.slice(0, 32).toString("hex")} ...`,
     );
   }
 
