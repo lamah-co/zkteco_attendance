@@ -618,7 +618,7 @@ class ZKTeco extends EventEmitter {
             password_count: res.data.readUInt32LE(52),
             operation_count: res.data.readUInt32LE(40),
             attendance_count: res.data.readUInt32LE(32),
-            attendance_capacity: res.data.readUInt32LE(60),
+            attendance_capacity: res.data.readUInt32LE(64),
             attendance_remaining: res.data.readUInt32LE(76),
             face_count: res.data.readUInt32LE(80),
             face_capacity: res.data.readUInt32LE(88),
