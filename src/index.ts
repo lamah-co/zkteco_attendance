@@ -599,6 +599,37 @@ class ZKTeco extends EventEmitter {
     });
   }
 
+  public async getDeviceDataSizes(): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this.send_command(
+        this.CMD_GET_FREE_SIZES,
+        this.EMPTY_BUFFER,
+        (res, err) => {
+          if (err) return reject(err);
+
+          const sizes = {
+            admin_count: res.data.readUInt32LE(48),
+            user_count: res.data.readUInt32LE(16),
+            user_capacity: res.data.readUInt32LE(60),
+            user_remaining: res.data.readUInt32LE(72),
+            fingerprint_count: res.data.readUInt32LE(24),
+            fingerprint_capacity: res.data.readUInt32LE(56),
+            fingerprint_remaining: res.data.readUInt32LE(68),
+            password_count: res.data.readUInt32LE(52),
+            operation_count: res.data.readUInt32LE(40),
+            attendance_count: res.data.readUInt32LE(32),
+            attendance_capacity: res.data.readUInt32LE(60),
+            attendance_remaining: res.data.readUInt32LE(76),
+            face_count: res.data.readUInt32LE(80),
+            face_capacity: res.data.readUInt32LE(88),
+          };
+
+          return resolve(sizes);
+        },
+      );
+    });
+  }
+
   public decodeTime(time: number): string {
     let t = time;
     let s = t % 60;
@@ -793,6 +824,9 @@ async function main() {
   const connect = async () => {
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
     log("Connected");
+
+    const sizes = await z.getDeviceDataSizes();
+    log(sizes);
 
     await z.disableDevice();
     try {
