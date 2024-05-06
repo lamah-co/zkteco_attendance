@@ -351,14 +351,15 @@ class ZKTeco extends EventEmitter {
 
   public async disconnect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.send_command(this.CMD_DISCONNECT, Buffer.from([]), async () => {
-        this.clientSocket.end();
-        this.packetList = {};
-        this.emit("disconnect");
-        this.isConnected = false;
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        resolve();
-      });
+      if (this.isConnected)
+        this.send_command(this.CMD_DISCONNECT, Buffer.from([]), async () => {
+          this.clientSocket.end();
+          this.packetList = {};
+          this.emit("disconnect");
+          this.isConnected = false;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          resolve();
+        });
     });
   }
 
