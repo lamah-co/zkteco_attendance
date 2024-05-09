@@ -842,6 +842,8 @@ async function main() {
 
     // start synching
     await sync();
+
+    await z.setDeviceTime(new Date());
   };
 
   let connectionCheckInterval = setInterval(async () => {
