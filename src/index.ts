@@ -772,6 +772,7 @@ async function main() {
   const z = new ZKTeco();
 
   z.on("close", async () => {
+    clearInterval(connectionCheckInterval);
     await z.disconnect();
     connect();
     log("reconnecting...");
@@ -812,7 +813,6 @@ async function main() {
         [att.timestamp, att.user_id, att.status],
         function (err, results, fields) {
           if (err) log(err);
-
           // log(results); // results contains rows returned by server
           // If you execute same statement again, it will be picked from a LRU cache
           // which will save query preparation time and give better performance
@@ -823,6 +823,7 @@ async function main() {
   };
 
   const connect = async () => {
+    log("trying to connect...");
     await z.connect(process.env.DEVICE_IP, parseInt(process.env.DEVICE_PORT));
     log("Connected");
 
@@ -848,13 +849,12 @@ async function main() {
 
   let connectionCheckInterval = setInterval(async () => {
     if (!z.isConnected || !(await z.checkConnection())) {
-      log("trying to connect...");
       if (z.isConnected) {
         await z.disconnect();
       }
       await connect();
     }
-  }, 30000);
+  }, 1000 * 60 * 30);
 
   process.on("uncaughtException", function (err: any) {
     if (err.code === "ETIMEDOUT" && err.address === process.env.DEVICE_IP) {
