@@ -5,6 +5,9 @@ import "dotenv/config";
 import fs from "fs";
 import cron from "node-cron";
 
+const fetch = (...args) =>
+  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
 const log = (...args: any[]) => {
   console.log(...args);
   // fs.appendFileSync("./.log", `${JSON.stringify(args)}\n`);
@@ -784,6 +787,7 @@ async function main() {
       rnd: Math.random(),
       event,
     });
+
     const connection = await getMysqlConnection();
     connection.execute(
       "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
@@ -796,6 +800,24 @@ async function main() {
         // which will save query preparation time and give better performance
       },
     );
+
+    const response = await fetch(
+      "https://hr.lamah.ly/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          employee_field_value: event.user_id,
+          timestamp: event.date,
+        }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `token ${process.env.API_KEY}:${process.env.API_SECRET}`,
+        },
+      },
+    );
+    const data = await response.json();
+
+    log("data: ", data);
   });
 
   let sync = async () => {
