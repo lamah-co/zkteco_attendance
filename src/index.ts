@@ -1,11 +1,12 @@
 import net from "net";
 import { EventEmitter } from "events";
-import mysql from "mysql2";
+import mysql from "mysql2/promise";
 import "dotenv/config";
 import fs from "fs";
 import cron from "node-cron";
 
 const fetch = (...args) =>
+  // @ts-ignore
   import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const log = (...args: any[]) => {
@@ -167,7 +168,10 @@ class ZKTeco extends EventEmitter {
       j += 2;
     }
 
-    chk_32b = (chk_32b & 0xffff) + ((chk_32b & 0xffff0000) >> 16);
+    // Fold carry bits into the lower 16 bits
+    while ((chk_32b & 0xffff0000) !== 0) {
+      chk_32b = (chk_32b & 0xffff) + (chk_32b >> 16);
+    }
 
     let chk_16b = chk_32b ^ 0xffff;
 
@@ -214,8 +218,8 @@ class ZKTeco extends EventEmitter {
   private send_command(command: number, data: Buffer, callback) {
     this.reply_number =
       command === this.CMD_CONNECT ||
-      command === this.CMD_ACK_OK ||
-      command === this.CMD_ACK_UNAUTH
+        command === this.CMD_ACK_OK ||
+        command === this.CMD_ACK_UNAUTH
         ? 0
         : (this.reply_number + 1) % this.USHORT_SIZE;
     const packet = this.create_packet(command, data);
@@ -355,9 +359,9 @@ class ZKTeco extends EventEmitter {
   public async disconnect(): Promise<void> {
     return new Promise(async (resolve, reject) => {
       if (this.isConnected)
-        this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => {});
+        this.send_command(this.CMD_DISCONNECT, Buffer.from([]), () => { });
       // wait 10 seconds for disconnect
-      await new Promise((resolve) => setTimeout(resolve, 10000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       this.clientSocket.end();
       this.packetList = {};
       this.emit("disconnect");
@@ -658,7 +662,7 @@ class ZKTeco extends EventEmitter {
         time.getMonth() * 31 +
         time.getDate() -
         1) *
-        (24 * 60 * 60) +
+      (24 * 60 * 60) +
       (time.getHours() * 60 + time.getMinutes()) * 60 +
       time.getSeconds();
     return d;
@@ -743,7 +747,7 @@ class ZKTeco extends EventEmitter {
 
   public async restartDevice(): Promise<void> {
     // The device will not acknowledge the restart command, so we just send it and wait for a few seconds
-    this.send_command(this.CMD_RESTART, this.EMPTY_BUFFER, () => {});
+    this.send_command(this.CMD_RESTART, this.EMPTY_BUFFER, () => { });
     await new Promise((resolve) => setTimeout(resolve, 20000));
   }
 }
@@ -751,17 +755,41 @@ class ZKTeco extends EventEmitter {
 async function main() {
   let _mysqlConnection: mysql.Connection;
 
+  const sendToFrappe = async (user_id: string, date: string) => {
+    try {
+      const response =
+        fetch(
+          "https://hr.lamah.ly/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              employee_field_value: user_id,
+              timestamp: date,
+            }),
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `token ${process.env.API_KEY}:${process.env.API_SECRET}`,
+            },
+          },
+        );
+
+      return response;
+    } catch (error) {
+      log(error);
+    }
+  }
+
   const getMysqlConnection = async () => {
     const disconnected = async () => {
-      return new Promise((resolve) => {
-        _mysqlConnection.ping((err) => {
-          resolve(err ? true : false);
-        });
-      });
+      try {
+        await _mysqlConnection.ping();
+      } catch (error) {
+        return true;
+      }
     };
 
     if (!_mysqlConnection || (await disconnected())) {
-      _mysqlConnection = mysql.createConnection({
+      _mysqlConnection = await mysql.createConnection({
         host: process.env.DB_HOST,
         port: parseInt(process.env.DB_PORT),
         user: process.env.DB_USER,
@@ -771,6 +799,32 @@ async function main() {
     }
 
     return _mysqlConnection;
+  };
+
+  const saveAttendance = async (user_id: string, date: string, status: string) => {
+    const connection = await getMysqlConnection();
+    try {
+      await connection.execute(
+        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`, `synced_to_frappe`) VALUES (?, ?, ?, false);",
+        [date, user_id, status],
+      );
+      log("Attendance for user: ", user_id, " at ", date, " saved to database");
+    } catch (error) {
+      log(error);
+    }
+
+    const [records] = await connection.query(
+      'SELECT `synced_to_frappe` FROM `attendance` WHERE `user_id` = ? AND `date` = ? LIMIT 1',
+      [user_id, date]
+    );
+
+    if (!records[0].synced_to_frappe) {
+      const response = await sendToFrappe(user_id, date);
+      if (response.ok) {
+        connection.execute('UPDATE `attendance` SET `synced_to_frappe` = true WHERE `user_id` = ? AND `date` = ?', [user_id, date]);
+        log("Attendance for user: ", user_id, " at ", date, " synced to frappe");
+      }
+    }
   };
 
   const z = new ZKTeco();
@@ -788,36 +842,9 @@ async function main() {
       event,
     });
 
-    const connection = await getMysqlConnection();
-    connection.execute(
-      "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
-      [event.date, event.user_id, event.att_state],
-      function (err, results, fields) {
-        if (err) log(err);
-
-        log(results); // results contains rows returned by server
-        // If you execute same statement again, it will be picked from a LRU cache
-        // which will save query preparation time and give better performance
-      },
-    );
-
-    const response = await fetch(
-      "https://hr.lamah.ly/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          employee_field_value: event.user_id,
-          timestamp: event.date,
-        }),
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `token ${process.env.API_KEY}:${process.env.API_SECRET}`,
-        },
-      },
-    );
-    const data = await response.json();
-
-    log("data: ", data);
+    if (process.env.ENVIRONMENT === "production") {
+      await saveAttendance(event.user_id, event.date, event.att_state);
+    }
   });
 
   let sync = async () => {
@@ -829,19 +856,13 @@ async function main() {
     } finally {
       await z.enableDevice();
     }
-    for (const att of attLog) {
-      const connection = await getMysqlConnection();
-      connection.execute(
-        "INSERT IGNORE INTO `attendance` (`date`, `user_id`, `verify_type`) VALUES (?, ?, ?);",
-        [att.timestamp, att.user_id, att.status],
-        function (err, results, fields) {
-          if (err) log(err);
-          // log(results); // results contains rows returned by server
-          // If you execute same statement again, it will be picked from a LRU cache
-          // which will save query preparation time and give better performance
-        },
-      );
+
+    if (process.env.ENVIRONMENT === "production") {
+      for (const att of attLog) {
+        await saveAttendance(att.user_id, att.timestamp, att.status);
+      }
     }
+
     log("finished synching");
   };
 
@@ -890,6 +911,7 @@ async function main() {
     log("Caught interrupt signal");
     clearInterval(connectionCheckInterval);
     if (z && z.isConnected) {
+      z.removeAllListeners();
       await z.disconnect();
       // wait promise 1000ms for disconnection
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -915,9 +937,13 @@ async function main() {
   // }, 10000);
 
   // sync database every day at 01:00 AM
-  cron.schedule("0 0 1 * * *", sync);
+  cron.schedule("0 0 1 * * *", () => sync());
   // Restart device every day at 06:00 AM
-  cron.schedule("0 0 6 * * *", z.restartDevice);
+  // cron.schedule("0 0 6 * * *", () => z.restartDevice());
+  // Reconect every hour
+  //cron.schedule(" 0 0 * * * *", async () => {
+  //  z.disconnect();
+  //});
 }
 
 main();
