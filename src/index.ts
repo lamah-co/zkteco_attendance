@@ -818,7 +818,7 @@ async function main() {
       [user_id, date]
     );
 
-    if (!records[0].synced_to_frappe) {
+    if (!records[0].synced_to_frappe && parseInt(date.substring(0, 4)) >= 2025) {
       const response = await sendToFrappe(user_id, date);
       if (response.ok) {
         connection.execute('UPDATE `attendance` SET `synced_to_frappe` = true WHERE `user_id` = ? AND `date` = ?', [user_id, date]);
